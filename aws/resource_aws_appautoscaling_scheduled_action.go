@@ -3,6 +3,7 @@ package aws
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -18,6 +19,10 @@ func resourceAwsAppautoscalingScheduledAction() *schema.Resource {
 		Create: resourceAwsAppautoscalingScheduledActionPut,
 		Read:   resourceAwsAppautoscalingScheduledActionRead,
 		Delete: resourceAwsAppautoscalingScheduledActionDelete,
+
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Schema: map[string]*schema.Schema{
 			"name": &schema.Schema{
@@ -145,10 +150,13 @@ func resourceAwsAppautoscalingScheduledActionPut(d *schema.ResourceData, meta in
 func resourceAwsAppautoscalingScheduledActionRead(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).appautoscalingconn
 
-	saName := d.Get("name").(string)
+	name, serviceNamespace, _, err := decodeAppautoscalingScheduledActionID(d.Id())
+	if err != nil {
+		return err
+	}
 	input := &applicationautoscaling.DescribeScheduledActionsInput{
-		ScheduledActionNames: []*string{aws.String(saName)},
-		ServiceNamespace:     aws.String(d.Get("service_namespace").(string)),
+		ScheduledActionNames: []*string{aws.String(name)},
+		ServiceNamespace:     aws.String(serviceNamespace),
 	}
 	resp, err := conn.DescribeScheduledActions(input)
 	if err != nil {
@@ -160,27 +168,54 @@ func resourceAwsAppautoscalingScheduledActionRead(d *schema.ResourceData, meta i
 		return nil
 	}
 	if len(resp.ScheduledActions) != 1 {
-		return fmt.Errorf("Expected 1 scheduled action under %s, found %d", saName, len(resp.ScheduledActions))
+		return fmt.Errorf("Expected 1 scheduled action under %s, found %d", name, len(resp.ScheduledActions))
 	}
-	if *resp.ScheduledActions[0].ScheduledActionName != saName {
-		return fmt.Errorf("Scheduled Action (%s) not found", saName)
+	if *resp.ScheduledActions[0].ScheduledActionName != name {
+		return fmt.Errorf("Scheduled Action (%s) not found", name)
 	}
-	d.Set("arn", resp.ScheduledActions[0].ScheduledActionARN)
+
+	action := resp.ScheduledActions[0]
+	d.Set("name", action.ScheduledActionName)
+	d.Set("service_namespace", action.ServiceNamespace)
+	d.Set("resource_id", action.ResourceId)
+	d.Set("scalable_dimension", action.ScalableDimension)
+	d.Set("schedule", action.Schedule)
+	if action.StartTime != nil {
+		d.Set("start_time", action.StartTime.Format(awsAppautoscalingScheduleTimeLayout))
+	}
+	if action.EndTime != nil {
+		d.Set("end_time", action.EndTime.Format(awsAppautoscalingScheduleTimeLayout))
+	}
+	if v := action.ScalableTargetAction; v != nil {
+		sta := make(map[string]interface{}, 1)
+		if v.MaxCapacity != nil {
+			sta["max_capacity"] = *v.MaxCapacity
+		}
+		if v.MinCapacity != nil {
+			sta["min_capacity"] = *v.MinCapacity
+		}
+		d.Set("scalable_target_action", []map[string]interface{}{sta})
+	}
+	d.Set("arn", action.ScheduledActionARN)
 	return nil
 }
 
 func resourceAwsAppautoscalingScheduledActionDelete(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).appautoscalingconn
 
+	name, serviceNamespace, resourceID, err := decodeAppautoscalingScheduledActionID(d.Id())
+	if err != nil {
+		return err
+	}
 	input := &applicationautoscaling.DeleteScheduledActionInput{
-		ScheduledActionName: aws.String(d.Get("name").(string)),
-		ServiceNamespace:    aws.String(d.Get("service_namespace").(string)),
-		ResourceId:          aws.String(d.Get("resource_id").(string)),
+		ScheduledActionName: aws.String(name),
+		ServiceNamespace:    aws.String(serviceNamespace),
+		ResourceId:          aws.String(resourceID),
 	}
 	if v, ok := d.GetOk("scalable_dimension"); ok {
 		input.ScalableDimension = aws.String(v.(string))
 	}
-	_, err := conn.DeleteScheduledAction(input)
+	_, err = conn.DeleteScheduledAction(input)
 	if err != nil {
 		if isAWSErr(err, applicationautoscaling.ErrCodeObjectNotFoundException, "") {
 			log.Printf("[WARN] Application Autoscaling Scheduled Action (%s) already gone, removing from state", d.Id())
@@ -191,4 +226,16 @@ func resourceAwsAppautoscalingScheduledActionDelete(d *schema.ResourceData, meta
 	}
 	d.SetId("")
 	return nil
+}
+
+func decodeAppautoscalingScheduledActionID(id string) (name, serviceNamespace, resourceID string, err error) {
+	parts := strings.SplitN(id, "-", 2)
+	if len(parts) != 3 {
+		err = fmt.Errorf("Appautoscaling ScheduledAction ID must be of the form <Name>-<ServiceNamespace>-<ResourceID>, was provided: %s", id)
+		return
+	}
+	name = parts[0]
+	serviceNamespace = parts[1]
+	resourceID = parts[2]
+	return
 }

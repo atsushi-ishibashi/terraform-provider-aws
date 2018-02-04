@@ -80,6 +80,28 @@ func TestAccAwsAppautoscalingScheduledAction_SpotFleet(t *testing.T) {
 	})
 }
 
+func TestAccAwsAppautoscalingScheduledAction_import(t *testing.T) {
+	resourceName := "aws_appautoscaling_scheduled_action.hoge"
+	ts := time.Now().AddDate(0, 0, 1).Format("2006-01-02T15:04:05")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAwsAppautoscalingScheduledActionDestroy,
+		Steps: []resource.TestStep{
+			resource.TestStep{
+				Config: testAccAppautoscalingScheduledActionConfig_DynamoDB(acctest.RandString(5), ts),
+			},
+
+			resource.TestStep{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
 func testAccCheckAwsAppautoscalingScheduledActionDestroy(s *terraform.State) error {
 	conn := testAccProvider.Meta().(*AWSClient).appautoscalingconn
 
@@ -88,9 +110,13 @@ func testAccCheckAwsAppautoscalingScheduledActionDestroy(s *terraform.State) err
 			continue
 		}
 
+		name, serviceNamespace, _, err := decodeAppautoscalingScheduledActionID(rs.Primary.ID)
+		if err != nil {
+			return err
+		}
 		input := &applicationautoscaling.DescribeScheduledActionsInput{
-			ScheduledActionNames: []*string{aws.String(rs.Primary.Attributes["name"])},
-			ServiceNamespace:     aws.String(rs.Primary.Attributes["service_namespace"]),
+			ScheduledActionNames: []*string{aws.String(name)},
+			ServiceNamespace:     aws.String(serviceNamespace),
 		}
 		resp, err := conn.DescribeScheduledActions(input)
 		if err != nil {
